@@ -4,8 +4,8 @@
 
 Customer want to use real world data (prompts) and test real model (instead of random weights).
 
-Triton's `perf_analyzer` is general for any request, not designed for LLM. 
-Triton's `GenAI-Perf` is built on top of `perf_analyzer`, closer to the user needs, but still miss some function support and flexibility, e.g. count tokens, supporting streaming mode. 
+Triton's `perf_analyzer` is general for any request, not designed for LLM.
+Triton's `GenAI-Perf` is built on top of `perf_analyzer`, closer to the user needs
 
 Givn the LLM inference latency, python's I/O performance won't likely inject signficant overhead on client side when sending/generating requests.
 
@@ -15,219 +15,98 @@ Givn the LLM inference latency, python's I/O performance won't likely inject sig
 a typical "jsonl" file, with "input" key in each line:
 
 ```
-{"input": "prompt 1...", "output": "..."}
-{"input": "prompt 2...", "output": "..."}
+{"input_text": "prompt 1..."}
+{"input_text": "prompt 2..."}
 ...
 ```
 
+the following sanity check uses `./data/openorca_10.jsonl` for testing.
+
 ### Command line Usage
 
-### Cross check the perf result 
+### Cross check the perf result
 
 **Result Using this Tool**
 
-command: 
+command:
 
 ```bash
-
 python3 llm_perf.py    \
-    -u localhost:9001 -i grpc -m ensemble    \
-    --concurrency 1,4,8  --input-data ./prompts.jsonl  \
-    --tokenizer-path /workspace/models/Qwen2-7B
+    -u localhost:18001 -i grpc -m ensemble   \
+    --concurrency 1,2,4 \
+    --tokenizer-path /workspace/models/Qwen2-7B \
+    --input-data ./data/openorca_10.jsonl
+
 ```
 
 Output:
 
 ```bash
-
-triton_url: localhost:9001, protocol: grpc, model: ensemble
-Special tokens have been added in the vocabulary, make sure the associated word embeddings are fine-tuned or trained.
 ------------------------------------------------------------
 Request concurrency: 1
-average_input_token_per_sec: 7830.079494413578
-average_output_token_per_sec: 3.7117065991177514
-average_ttft: 0.03435562758944755
-average_latency: 0.03720159222220266
-p99_ttft: 0.03717458248138428
-p99_latency: 0.10233128070831299
-payload and results: 1376 1376
-throughput: 23.4745319777834 infer/sec.
-------------------------------------------------------------
-Request concurrency: 4
-
-average_input_token_per_sec: 2399.1026486293395
-average_output_token_per_sec: 1.137250923088528
-average_ttft: 0.11386719952489055
-average_latency: 0.12141682415507561
-p99_ttft: 0.12180376052856445
-p99_latency: 0.2988126873970032
-payload and results: 1376 1376
-throughput: 32.68018036492472 infer/sec.
-------------------------------------------------------------
-Request concurrency: 8
-average_input_token_per_sec: 1243.584730614387
-average_output_token_per_sec: 0.589498695955345
-average_ttft: 0.21896617253159367
-average_latency: 0.23423528549976128
-p99_ttft: 0.2427530288696289
-p99_latency: 0.6333500146865845
-payload and results: 1376 1376
-throughput: 33.87773848529009 infer/sec.
+|                          |   Average |    Min |     Max |     P99 |     P90 |     P75 |
+|:-------------------------|----------:|-------:|--------:|--------:|--------:|--------:|
+| Time to first token (ms) |     68.03 |  15.61 |  485.8  |  447.55 |  103.32 |   18.48 |
+| Inter token latency (ms) |     11.81 |  11.27 |   14.16 |   13.98 |   12.31 |   11.95 |
+| Request latency (ms)     |   1344.75 | 196.37 | 3393.54 | 3392.83 | 3386.39 | 1975.16 |
+num of payload: 10; completed results: 10
+request per sec (throughput in system): 0.7426 infer/sec
+total input token per sec (in system): 139.5388 token/sec
+total output token per sec (in system): 83.8421 token/sec
 
 ```
 
 
+**Result Using Triton's genai-perf**
 
-**Result Using Triton's perf_analyzer**
-
-
-command: 
+command:
 
 ```bash
 
-perf_analyzer  -u localhost:9001 -i grpc     -m ensemble --async --input-data prompts_perfanalyzer.json     --measurement-interval 10000      --profile-export-file qwen2-7b-1024_1.json      --service-kind triton      -v --endpoint v1/chat/completions      --concurrency-range 6:8:1      --stability-percentage 999      --streaming --shape max_tokens:1 --shape text_input:1
+export TRITON_URI=127.0.0.1:18001
 
+genai-perf profile \
+  -m ensemble \
+  --service-kind triton \
+  --backend tensorrtllm \
+  --input-file ./data/openorca_10.jsonl \
+  --streaming \
+  --output-tokens-mean 300 \
+  --output-tokens-stddev 0 \
+  --output-tokens-mean-deterministic \
+  --tokenizer /home/lukex/workspace/models/Qwen2-7B \
+  --concurrency 1 \
+  --measurement-interval 10000 \
+  --profile-export-file qwen2-7b_results_test.json \
+  --url ${TRITON_URI}
 ```
 
-Output:
+output:
 
 ```bash
 
- Successfully read data for 1 stream/streams with 1376 step/steps.
-*** Measurement Settings ***
-  Batch size: 1
-  Service Kind: TRITON
-  Using "time_windows" mode for stabilization
-  Stabilizing using average throughput
-  Measurement window: 10000 msec
-  Latency limit: 0 msec
-  Concurrency limit: 8 concurrent requests
-  Using asynchronous calls for inference
-  Detected decoupled model, using the first response for measuring latency
+2024-09-20 07:12 [INFO] genai_perf.parser:90 - Profiling these models: ensemble
+2024-09-20 07:12 [INFO] genai_perf.wrapper:147 - Running Perf Analyzer : 'perf_analyzer -m ensemble --async --input-data artifacts/ensemble-triton-tensorrtllm-concurrency1/llm_inputs.json -i grpc --streaming --shape max_tokens:1 --shape text_input:1 --concurrency-range 1 --service-kind triton -u 127.0.0.1:18001 --measurement-interval 10000 --stability-percentage 999 --profile-export-file artifacts/ensemble-triton-tensorrtllm-concurrency1/qwen2-7b_results_test.json'
+                                         LLM Metrics
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┓
+┃                Statistic ┃      avg ┃      min ┃      max ┃      p99 ┃      p90 ┃      p75 ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━┩
+│ Time to first token (ms) │    52.10 │    14.55 │   335.78 │   311.03 │    88.31 │    17.47 │
+│ Inter token latency (ms) │    11.41 │    11.24 │    11.69 │    11.68 │    11.68 │    11.46 │
+│     Request latency (ms) │ 3,426.12 │ 3,373.51 │ 3,753.69 │ 3,729.47 │ 3,511.51 │ 3,382.11 │
+│   Output sequence length │   296.70 │   289.00 │   300.00 │   300.00 │   300.00 │   299.75 │
+│    Input sequence length │   187.90 │    49.00 │   941.00 │   870.98 │   240.80 │   155.50 │
+└──────────────────────────┴──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘
+Output token throughput (per sec): 86.59
+Request throughput (per sec): 0.29
 
-Request concurrency: 6
-  Pass [1] throughput: 33.8321 infer/sec. Avg latency: 176620 usec (std 60100 usec).
-  Pass [2] throughput: 33.5781 infer/sec. Avg latency: 178174 usec (std 40172 usec).
-  Pass [3] throughput: 33.1613 infer/sec. Avg latency: 179927 usec (std 71863 usec).
-  Client:
-    Request count: 1207
-    Throughput: 33.5238 infer/sec
-    Response Throughput: 38.7177 infer/sec
-    Avg client overhead: 0.01%
-    Avg latency: 178229 usec (standard deviation 58760 usec)
-    p50 latency: 177093 usec
-    p90 latency: 178921 usec
-    p95 latency: 179616 usec
-    p99 latency: 543558 usec
-
-  Server:
-    Inference count: 1207
-    Execution count: 1207
-    Successful request count: 1207
-    Avg request latency: 177344 usec (overhead 29 usec + queue 1368 usec + compute 175947 usec)
-
-  Composing models:
-  postprocessing, version: 1
-      Inference count: 1394
-      Execution count: 1394
-      Successful request count: 1394
-      Avg request latency: 721 usec (overhead 3 usec + queue 481 usec + compute input 24 usec + compute infer 156 usec + compute output 56 usec)
-
-  preprocessing, version: 1
-      Inference count: 1213
-      Execution count: 1213
-      Successful request count: 1213
-      Avg request latency: 1511 usec (overhead 3 usec + queue 838 usec + compute input 21 usec + compute infer 584 usec + compute output 64 usec)
-
-  tensorrt_llm, version: 1
-      Inference count: 1207
-      Execution count: 1207
-      Successful request count: 1207
-      Avg request latency: 175090 usec (overhead 1 usec + queue 49 usec + compute input 22 usec + compute infer 174927 usec + compute output 89 usec)
-
-Request concurrency: 7
-  Pass [1] throughput: 33.9992 infer/sec. Avg latency: 206523 usec (std 77695 usec).
-  Pass [2] throughput: 33.9111 infer/sec. Avg latency: 206535 usec (std 19095 usec).
-  Pass [3] throughput: 33.4111 infer/sec. Avg latency: 208196 usec (std 87954 usec).
-  Client:
-    Request count: 1216
-    Throughput: 33.7738 infer/sec
-    Response Throughput: 38.6344 infer/sec
-    Avg client overhead: 0.01%
-    Avg latency: 207079 usec (standard deviation 68494 usec)
-    p50 latency: 206087 usec
-    p90 latency: 207785 usec
-    p95 latency: 208575 usec
-    p99 latency: 542962 usec
-
-  Server:
-    Inference count: 1216
-    Execution count: 1216
-    Successful request count: 1216
-    Avg request latency: 206149 usec (overhead 22 usec + queue 1370 usec + compute 204757 usec)
-
-  Composing models:
-  postprocessing, version: 1
-      Inference count: 1396
-      Execution count: 1396
-      Successful request count: 1396
-      Avg request latency: 732 usec (overhead 3 usec + queue 495 usec + compute input 21 usec + compute infer 158 usec + compute output 54 usec)
-
-  preprocessing, version: 1
-      Inference count: 1217
-      Execution count: 1217
-      Successful request count: 1217
-      Avg request latency: 1499 usec (overhead 3 usec + queue 848 usec + compute input 21 usec + compute infer 566 usec + compute output 60 usec)
-
-  tensorrt_llm, version: 1
-      Inference count: 1216
-      Execution count: 1216
-      Successful request count: 1216
-      Avg request latency: 203903 usec (overhead 1 usec + queue 27 usec + compute input 22 usec + compute infer 203765 usec + compute output 87 usec)
-
-Request concurrency: 8
-  Pass [1] throughput: 33.9156 infer/sec. Avg latency: 236511 usec (std 84874 usec).
-  Pass [2] throughput: 33.9105 infer/sec. Avg latency: 235124 usec (std 58805 usec).
-  Pass [3] throughput: 33.6609 infer/sec. Avg latency: 238354 usec (std 86544 usec).
-  Client:
-    Request count: 1218
-    Throughput: 33.829 infer/sec
-    Response Throughput: 38.4951 infer/sec
-    Avg client overhead: 0.01%
-    Avg latency: 236659 usec (standard deviation 77709 usec)
-    p50 latency: 234745 usec
-    p90 latency: 236506 usec
-    p95 latency: 237074 usec
-    p99 latency: 685800 usec
-
-  Server:
-    Inference count: 1218
-    Execution count: 1218
-    Successful request count: 1218
-    Avg request latency: 235734 usec (overhead 33 usec + queue 1659 usec + compute 234042 usec)
-
-  Composing models:
-  postprocessing, version: 1
-      Inference count: 1381
-      Execution count: 1381
-      Successful request count: 1381
-      Avg request latency: 830 usec (overhead 3 usec + queue 603 usec + compute input 20 usec + compute infer 147 usec + compute output 55 usec)
-
-  preprocessing, version: 1
-      Inference count: 1219
-      Execution count: 1219
-      Successful request count: 1219
-      Avg request latency: 1637 usec (overhead 3 usec + queue 1016 usec + compute input 19 usec + compute infer 547 usec + compute output 51 usec)
-
-  tensorrt_llm, version: 1
-      Inference count: 1218
-      Execution count: 1218
-      Successful request count: 1218
-      Avg request latency: 233241 usec (overhead 1 usec + queue 40 usec + compute input 18 usec + compute infer 233090 usec + compute output 91 usec)
-
-Inferences/Second vs. Client Average Batch Latency
-Concurrency: 6, throughput: 33.5238 infer/sec, latency 178229 usec
-Concurrency: 7, throughput: 33.7738 infer/sec, latency 207079 usec
-Concurrency: 8, throughput: 33.829 infer/sec, latency 236659 usec
+2024-09-20 07:12 [INFO] genai_perf.export_data.json_exporter:58 - Generating artifacts/ensemble-triton-tensorrtllm-concurrency1/qwen2-7b_results_test_genai_perf.json
+2024-09-20 07:12 [INFO] genai_perf.export_data.csv_exporter:69 - Generating artifacts/ensemble-triton-tensorrtllm-concurrency1/qwen2-7b_results_test_genai_perf.csv
 ```
 
+
+**Difference**
+
+* `Inter token latency` and `output token per sec `: two approaches have similiar results
+* `Request latency` and `Request throughput`: big difference between two approach, mainly because genai-perf force a fixed num of output tokens, while `llm_perf.py` stop earlier.
+* `Time to first token`: some difference between the two approaches.

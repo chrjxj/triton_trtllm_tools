@@ -15,22 +15,25 @@
 # limitations under the License.
 
 """
-This tool can perf the LLM inference service hosted by Triton Inference Server.
+This tool can perf the LLM inference service hosted by
+Triton Inference Server (https://github.com/triton-inference-server/tensorrtllm_backend).
 
 Usage example:
 
     python3 llm_perf.py \
             -u localhost:9001 -i grpc -m ensemble \
             --concurrency 2,4,8,16 \
-            --input-data prompts.jsonl --tokenizer-path /models/Qwen2-7B
+            --tokenizer-path /models/Qwen2-7B \
+            --input-data prompts.jsonl
 
 Command line args:
     -u <URL for inference service>
     -i <Protocol used to communicate with inference service>
-    -m: This is a required argument and is used to specify the model against which to run perf_analyzer.
+    -m: This is a required argument and is used to specify the model name
     --concurrency a list of concurrency on client side, e.g. "1,4,8"
     --input-data <<file path>>
-    --profile-export-file <path>
+    --tokenizer-path <<tokenizer folder path>>
+    --profile-export-file <<file path, save profile results>>
 """
 
 import os
@@ -61,7 +64,7 @@ class Payload(BaseModel):
     top_k:  int = 1
     top_p:  float = 0
     beam_width:  int = 1
-    repetition_penalty:  float = 1.0    
+    repetition_penalty:  float = 1.0
     length_penalty: float = 1.0
 
 
@@ -72,18 +75,18 @@ def send_request(payload, triton_url="", protocol="grpc", model_name="ensemble")
         ttft=-1,
         e2e_latency=-1,
     )
-    
+
     if isinstance(payload, dict):
         pass
     elif isinstance(payload, Payload):
         payload = payload.dict()
     else:
         raise TypeError
-    
+
     if protocol.lower() == "grpc":
         triton_client = GrpcTritonClient(triton_url)
         triton_client.load_model(model_name)
-        
+
         start_time = time.time()
         tokens_generated = 0
         output_text = ""
@@ -96,16 +99,12 @@ def send_request(payload, triton_url="", protocol="grpc", model_name="ensemble")
         perf_result["output_text"] = output_text
         perf_result["ttft"] = ttft
         perf_result["e2e_latency"] = time.time() - start_time
+        #perf_result["e2e_latency"] = ttft if perf_result["e2e_latency"] <= ttft else perf_result["e2e_latency"]
 
-        total_time = time.time() - start_time
-        # print(
-        #     f"\n--- Generated {tokens_generated} tokens in {total_time} seconds ---")
-        # print(f"--- {tokens_generated/total_time} tokens/sec")
-        
     elif protocol.lower() == "http":
         triton_client = HttpTritonClient(triton_url)
         triton_client.load_model(model_name)
-        
+
         start_time = time.time()
         res = triton_client.request(model_name, **payload)
         perf_result["e2e_latency"] = time.time() - start_time
@@ -115,7 +114,7 @@ def send_request(payload, triton_url="", protocol="grpc", model_name="ensemble")
         # print(f"\n--- used {total_time} seconds ---")
 
     else:
-        raise TypeError
+        raise ValueError
 
     return perf_result
 
@@ -123,6 +122,10 @@ def send_request(payload, triton_url="", protocol="grpc", model_name="ensemble")
 def load_payload_from_json(json_file):
 
     df = pd.read_json(json_file, lines=True)
+
+    if "text_input" not in df.columns:
+        raise ValueError("Json file must provide prompts (input text) using **text_input** flied. but got: {}".format(df.columns))
+
     payloads = [
         {
             'prompt': [[prompt]],
@@ -134,40 +137,70 @@ def load_payload_from_json(json_file):
             'repetition_penalty': 1.0,
             'length_penalty': 1.0
         }
-        for prompt in df.input
+        for prompt in df.text_input
     ]
     return payloads
 
 
-def calculate_perf(tokenizer, payloads, perf_results):
+def calculate_perf_stats(perf_results, decimal_digits = 2):
 
-    for payload, result in zip(payloads, perf_results):
-        result["input_tokens"] = len(tokenizer.encode(payload["prompt"][0][0]))
-        result["output_tokens"] = len(tokenizer.encode(result["output_text"]))
+    # # calc stats
+    # metrics = {
+    #     'Metrics': ["Average", "P99", "P90", "P75"],
+    #     'TTFT (sec)': [
+    #             round(np.average([item["ttft"] for item in perf_results]), decimal_digits),
+    #             round(np.percentile([item["ttft"] for item in perf_results], 99), decimal_digits),
+    #             round(np.percentile([item["ttft"] for item in perf_results], 90), decimal_digits),
+    #             round(np.percentile([item["ttft"] for item in perf_results], 75), decimal_digits),
 
-    # calc avg. 
-    average_input_token_per_sec = sum([item["input_tokens"] for item in perf_results]) / sum([item["e2e_latency"] for item in perf_results])
-    average_output_token_per_sec = sum([item["output_tokens"] for item in perf_results]) / sum([item["e2e_latency"] for item in perf_results])
-    average_ttft =  sum([item["ttft"] for item in perf_results]) / len(perf_results)
-    average_latency = sum([item["e2e_latency"] for item in perf_results]) / len(perf_results)
-    p99_ttft = np.percentile([item["ttft"] for item in perf_results], 99)
-    p99_latency = np.percentile([item["e2e_latency"] for item in perf_results], 99)
+    #             ],
+    #     'E2E_Latency (sec)': [
+    #             round(np.average([item["e2e_latency"] for item in perf_results]), decimal_digits),
+    #             round(np.percentile([item["e2e_latency"] for item in perf_results], 99), decimal_digits),
+    #             round(np.percentile([item["e2e_latency"] for item in perf_results], 90), decimal_digits),
+    #             round(np.percentile([item["e2e_latency"] for item in perf_results], 75), decimal_digits),
+    #             ],
+    #     'TPOT (sec)': [
+    #             round(np.average([item["TPOT"] for item in perf_results]), decimal_digits),
+    #             round(np.percentile([item["TPOT"] for item in perf_results], 99), decimal_digits),
+    #             round(np.percentile([item["TPOT"] for item in perf_results], 90), decimal_digits),
+    #             round(np.percentile([item["TPOT"] for item in perf_results], 75), decimal_digits),
+    #             ],
+    # }
 
-    print("average_input_token_per_sec:", average_input_token_per_sec)
-    print("average_output_token_per_sec:", average_output_token_per_sec)
-    print("average_ttft:", average_ttft)
-    print("average_latency:", average_latency)
-    print("p99_ttft:", p99_ttft)
-    print("p99_latency:", p99_latency)
+    # calc stats
+    metrics = {
+        'Metrics': ["Average", "Min", "Max", "P99", "P90", "P75"],
+        'Time to first token (ms)': [
+                round(np.average([item["ttft"]    *1000 for item in perf_results]), decimal_digits),
+                round(min([item["ttft"]    *1000 for item in perf_results]), decimal_digits),
+                round(max([item["ttft"]    *1000 for item in perf_results]), decimal_digits),
+                round(np.percentile([item["ttft"] *1000 for item in perf_results], 99), decimal_digits),
+                round(np.percentile([item["ttft"] *1000 for item in perf_results], 90), decimal_digits),
+                round(np.percentile([item["ttft"] *1000 for item in perf_results], 75), decimal_digits),
 
-    metrics = dict(
-        average_input_token_per_sec=average_input_token_per_sec,
-        average_output_token_per_sec=average_output_token_per_sec,
-        average_ttft=average_ttft,
-        average_latency=average_latency,
-        p99_ttft=p99_ttft,
-        p99_latency=p99_latency,
-    )
+                ],
+        'Inter token latency (ms)': [
+                round(np.average([item["TPOT"]    *1000 for item in perf_results]), decimal_digits),
+                round(min([item["TPOT"]    *1000 for item in perf_results]), decimal_digits),
+                round(max([item["TPOT"]    *1000 for item in perf_results]), decimal_digits),
+                round(np.percentile([item["TPOT"] *1000 for item in perf_results], 99), decimal_digits),
+                round(np.percentile([item["TPOT"] *1000 for item in perf_results], 90), decimal_digits),
+                round(np.percentile([item["TPOT"] *1000 for item in perf_results], 75), decimal_digits),
+                ],
+        'Request latency (ms)': [
+                round(np.average([item["e2e_latency"]    *1000 for item in perf_results]), decimal_digits),
+                round(min([item["e2e_latency"]    *1000 for item in perf_results]), decimal_digits),
+                round(max([item["e2e_latency"]    *1000 for item in perf_results]), decimal_digits),
+                round(np.percentile([item["e2e_latency"] *1000 for item in perf_results], 99), decimal_digits),
+                round(np.percentile([item["e2e_latency"] *1000 for item in perf_results], 90), decimal_digits),
+                round(np.percentile([item["e2e_latency"] *1000 for item in perf_results], 75), decimal_digits),
+                ],
+    }
+
+    df = pd.DataFrame(metrics)
+    df_indexed = df.set_index("Metrics")
+    print(df_indexed.T.to_markdown())
 
     return metrics
 
@@ -186,7 +219,7 @@ def main(args):
     assert(isinstance(args.concurrency, list))
 
     send_request_ensemble = partial(
-        send_request, triton_url=triton_url, protocol=protocol, model_name=model_name)        
+        send_request, triton_url=triton_url, protocol=protocol, model_name=model_name)
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path, trust_remote_code=True)
@@ -207,28 +240,55 @@ def main(args):
         with ThreadPoolExecutor(max_workers=con) as executor:
             perf_results += list(executor.map(send_request_ensemble, payloads))
 
+        # the end-to-end latency between the first request and the last response of the last request.
         total_time = time.time() - start_time
-        metrics = calculate_perf(tokenizer, payloads, perf_results)        
+
+        # post process
+        for payload, result in zip(payloads, perf_results):
+            result["input_tokens"] = len(tokenizer.encode(payload["prompt"][0][0]))
+            result["output_tokens"] = len(tokenizer.encode(result["output_text"]))
+            #  time per output token (TPOT). or avg. Inter-token Latency (ITL)
+            result["TPOT"] = (result["e2e_latency"] - result["ttft"]) / (result["output_tokens"]-1)
+
+            # result["input_token_per_sec"] = perf_results["input_tokens"] / perf_results["e2e_latency"]
+            # result["output_token_per_sec"] = perf_results["output_tokens"] / perf_results["e2e_latency"]
+
+        metrics_stats = calculate_perf_stats(perf_results)
+
+        # Total TPS per system represents the total output tokens per seconds throughput, accounting for all the requests happening simultaneously.
+        total_output_tps_in_system = sum([item["output_tokens"] for item in perf_results]) / total_time
+        total_input_tps_in_system = sum([item["input_tokens"] for item in perf_results]) / total_time
+
+        # TODO: use actual completed
+        # average number of requests that can be successfully completed by the system
+        request_per_sec = len(perf_results) / total_time
+
         full_results[con] = dict(
             concurrency = con,
             client_requests=len(payloads),
-            throughput=len(payloads)/total_time,
             perf_results=perf_results,
-            metrics=metrics,
+            metrics_stats=metrics_stats,
+            total_output_tps_in_system=total_output_tps_in_system,
+            total_input_tps_in_system=total_input_tps_in_system,
+            request_per_sec=request_per_sec,
         )
-        
-        print("payload and results:", len(payloads), len(perf_results))
-        print("throughput: {} infer/sec. ".format(len(payloads)/total_time))  
-        
-        time.sleep(args.measurement_interval)  
 
+        print(f"num of payload: {len(payloads)}; completed results: {len(perf_results)}")
+        print(f"request per sec (throughput in system): {round(request_per_sec,4)} infer/sec")
+        print(f"total input token per sec (in system): {round(total_input_tps_in_system,4)} token/sec")
+        print(f"total output token per sec (in system): {round(total_output_tps_in_system,4)} token/sec")
+        print("\n")
+        print("-"*60)
 
+        time.sleep(args.measurement_interval)
+
+    # after all case, save results to a text file
     with open(args.profile_export_file, "w") as fp:
-        json.dump(full_results, fp)  
+        json.dump(full_results, fp, ensure_ascii=False, indent=2)
 
 
 if __name__ == '__main__':
-    
+
     parser = argparse.ArgumentParser(description='argparse')
     parser.add_argument('-u', '--uri', type=str, default='localhost:8001',
                         help='URL for inference service; host name or IP address and port')
@@ -246,3 +306,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     main(args)
+
+    print("\nNote: Metrics definition in the guide for details: https://docs.nvidia.com/nim/benchmarking/llm/latest/metrics.html")
+    print("-"*60)
+    print("\n")
